@@ -1,27 +1,19 @@
 package main
 
 import (
-	"context"
-	"fmt"
-
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-func CreateMongoConnection() (*mongo.Client, error) {
+func CreateMinioConnection() (*minio.Client, error) {
 
-	mongoHost := GetEnv("MONGO_HOST", "localhost")
-	mongoPort := GetEnv("MONGO_PORT", "27017")
+	minioEndpoint := GetEnv("MINIO_ENDPOINT", "localhost:9001")
+	minioKey := GetEnv("MINIO_ACCESS_KEY", "0t7nB2RIqguQXTnPwRTY")
+	minioSecret := GetEnv("MINIO_ACCESS_SECRET", "qe1AD0ahdB1eDwgL9uCA3pxjChC4E5Shfpmx2og8")
 
-	mongoUser := GetEnv("MONGO_USERNAME", "root")
-	mongoPassword := GetEnv("MONGO_PASSWORD", "root")
+	return minio.New(minioEndpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(minioKey, minioSecret, ""),
+		Secure: false,
+	})
 
-	connection := fmt.Sprintf("mongodb://%s:%s@%s:%s", mongoUser, mongoPassword, mongoHost, mongoPort)
-
-	fmt.Printf("Using database connection: %s", connection)
-
-	serverAPI := options.ServerAPI(options.ServerAPIVersion1)
-	opts := options.Client().ApplyURI(connection).SetServerAPIOptions(serverAPI)
-
-	return mongo.Connect(context.TODO(), opts)
 }

@@ -2,48 +2,80 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/json"
 	"fmt"
-	"log"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
+	"github.com/minio/minio-go/v7"
 )
 
-func GetCredentialsPreviewHandler(collection *mongo.Collection) func(c *gin.Context) {
+func GetCredentialsPreviewHandler(client *minio.Client) func(c *gin.Context) {
 	return func(c *gin.Context) {
-		cursor, err := collection.Find(context.TODO(), bson.M{})
-		if err != nil {
-			log.Fatal(err)
-		}
 
 		var credentials []CredentialsPreview
-		if err = cursor.All(context.TODO(), &credentials); err != nil {
-			log.Fatal(err)
+		for object := range client.ListObjects(context.Background(), "secrets", minio.ListObjectsOptions{}) {
+
+			key := object.Key
+
+			reader, err := client.GetObject(context.Background(), "secrets", key, minio.GetObjectOptions{})
+
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": err,
+				})
+				fmt.Println(err)
+				return
+			}
+
+			objectContent, err := ReaderToString(reader)
+
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": err,
+				})
+				fmt.Println(err)
+				return
+			}
+
+			var credential CredentialsPreview
+
+			if err := json.Unmarshal([]byte(objectContent), &credential); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": err,
+				})
+				fmt.Println(err)
+				return
+			}
+
+			credentials = append(credentials, credential)
 		}
 
 		c.JSON(http.StatusOK, credentials)
 	}
 }
 
-func GetSingleCredentialsHandler(collection *mongo.Collection) func(c *gin.Context) {
+func ReaderToString(reader io.Reader) (string, error) {
+
+	result, err := io.ReadAll(reader)
+
+	if err != nil {
+		return "", err
+	}
+
+	return string(result), nil
+}
+
+func GetSingleCredentialsHandler(client *minio.Client) func(c *gin.Context) {
 	return func(c *gin.Context) {
 		key := c.Param("key")
 
-		objectId, err := primitive.ObjectIDFromHex(key)
+		reader, err := client.GetObject(context.Background(), "secrets", fmt.Sprintf("%s.json", key), minio.GetObjectOptions{})
+
 		if err != nil {
-			log.Println("Invalid id")
-			c.JSON(http.StatusNotFound, gin.H{
-				"error":       err,
-				"requestedID": key,
-			})
-		}
-
-		var credentials Credentials
-
-		if err := collection.FindOne(context.TODO(), bson.M{"_id": objectId}).Decode(&credentials); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error": err,
 			})
@@ -51,30 +83,72 @@ func GetSingleCredentialsHandler(collection *mongo.Collection) func(c *gin.Conte
 			return
 		}
 
+		defer reader.Close()
+
+		objectContent, err := ReaderToString(reader)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": err,
+			})
+			fmt.Println(err)
+			return
+		}
+
+		credentials := Credentials{}
+		json.Unmarshal([]byte(objectContent), &credentials)
+
 		c.JSON(http.StatusOK, credentials)
 	}
 }
 
-func CreateCredentialsHandler(collection *mongo.Collection) func(c *gin.Context) {
+func CreateCredentialsHandler(client *minio.Client) func(c *gin.Context) {
 
 	return func(c *gin.Context) {
 		var credentials Credentials
 
 		err := c.ShouldBind(&credentials)
 
-		if err == nil {
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": err,
+			})
+			fmt.Println(err)
+			return
+		}
 
-			result, err := collection.InsertOne(context.Background(), credentials)
+		plainHash := fmt.Sprintf("%s.%s", credentials.Name, credentials.Secret)
+		byteHash := md5.Sum([]byte(plainHash))
+		objectHash := fmt.Sprintf("%x", byteHash)
+
+		credentials.ID = string(objectHash)
+
+		objectContent, err := json.Marshal(credentials)
+
+		if err == nil {
+			_, err := client.PutObject(
+				context.Background(),
+				"secrets",
+				fmt.Sprintf("%s.json", objectHash),
+				strings.NewReader(string(objectContent)),
+				int64(len(objectContent)),
+				minio.PutObjectOptions{},
+			)
+
 			if err != nil {
-				log.Fatal(err)
 				c.JSON(http.StatusInternalServerError, gin.H{
 					"error": err,
 				})
+				fmt.Println(err)
+				return
 			}
 
-			c.JSON(http.StatusOK, gin.H{
-				"id": result.InsertedID,
-			})
+			c.JSON(
+				http.StatusOK,
+				gin.H{
+					"createdId": objectHash,
+				},
+			)
 
 			return
 		}
@@ -85,19 +159,16 @@ func CreateCredentialsHandler(collection *mongo.Collection) func(c *gin.Context)
 	}
 }
 
-func DeleteCredentialsHandler(collection *mongo.Collection) func(c *gin.Context) {
+func DeleteCredentialsHandler(client *minio.Client) func(c *gin.Context) {
 	return func(c *gin.Context) {
 		key := c.Param("key")
 
-		objectId, err := primitive.ObjectIDFromHex(key)
-
-		if err != nil {
-			fmt.Println(err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err})
-			return
-		}
-
-		result, err := collection.DeleteOne(context.Background(), bson.M{"_id": objectId})
+		err := client.RemoveObject(
+			context.Background(),
+			"secrets",
+			fmt.Sprintf("%s.json", key),
+			minio.RemoveObjectOptions{},
+		)
 
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -106,7 +177,7 @@ func DeleteCredentialsHandler(collection *mongo.Collection) func(c *gin.Context)
 		}
 
 		c.JSON(http.StatusOK, gin.H{
-			"deletedCount": result.DeletedCount,
+			"deletedId": key,
 		})
 	}
 }
