@@ -22,5 +22,5 @@ func main() {
 		v1.DELETE("/:key", DeleteCredentialsHandler(client))
 	}
 
-	log.Fatal(router.Run(":7703"))
+	log.Fatal(router.Run(":80"))
 }
